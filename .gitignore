@@ -1,1 +1,4 @@
 *.json
+storage/
+*.txt
+gitpraq.py
