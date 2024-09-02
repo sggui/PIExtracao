@@ -2,3 +2,5 @@
 storage/
 *.txt
 gitpraq.py
+.venv/
+.env
