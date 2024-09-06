@@ -39,21 +39,15 @@ def load_checkpoint():
             return json.load(f)
     return None
 
+# Definir um User-Agent padrão
+DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/112.0.0.0'
+
 def fetch_data(page):
     url = f'https://www.webmotors.com.br/api/search/car?url=https://www.webmotors.com.br/carros-usados%2Festoque%3Flkid%3D1000%26estadocidade%3DS%25C3%25A3o%2520Paulo&actualPage={page}&displayPerPage=24&order=1&showMenu=true&showCount=true&showBreadCrumb=true&testAB=false&returnUrl=false&pandora=false'
     headers = {
+        'User-Agent': DEFAULT_USER_AGENT,
         'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
         'Connection': 'keep-alive',
-        'Cookie': 'WebMotorsLastSearches=...; AMCVS_3ADD33055666F1A47F000101%40AdobeOrg=1; at_check=true; WebMotorsVisitor=1; WebMotorsLocation=...; WMLastFilterSearch=...; WebMotorsSearchDataLayer=...; mbox=PC#...|session#...#...; AMCV_3ADD33055666F1A47F000101%40AdobeOrg=...;vVersion=5.5.0',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/112.0.0.0',
-        'X-Channel-Id': 'webmotors.buyer.desktop.ui',
-        'sec-ch-ua': '"Not/A)Brand";v="8", "Chromium";v="126", "Opera GX";v="112"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"'
     }
 
     response = requests.get(url, headers=headers)
@@ -65,7 +59,7 @@ def fetch_car_details(unique_id):
         'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
         'Connection': 'keep-alive',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/112.0.0.0'
+        'User-Agent': DEFAULT_USER_AGENT
     }
 
     response = requests.get(url_id, headers=headers)
@@ -84,6 +78,22 @@ def get_last_page():
     last_page = int(last_file.replace('.json', ''))
     
     return last_page + 1
+
+def car_exists_in_db(unique_id):
+    """Verifica se o carro com o unique_id já existe no banco de dados."""
+    cursor.execute("SELECT COUNT(1) FROM AUTO.dbo.carros WHERE unique_id = ?", (unique_id,))
+    result = cursor.fetchone()
+    return result[0] > 0
+
+def fetch_car_details_if_not_exists(unique_id):
+    """Verifica se o carro já está no banco de dados e busca detalhes caso não exista."""
+    if car_exists_in_db(unique_id):
+        logging.info(f"Carro com UniqueId {unique_id} já está no banco de dados. Pulando requisição.")
+        return None
+    else:
+        logging.info(f"Buscando detalhes do carro com UniqueId {unique_id}.")
+        response = fetch_car_details(unique_id)
+        return response
 
 def save_data_to_db(car):
     try:
@@ -147,6 +157,16 @@ def save_data_to_db(car):
         conn.rollback()
         return False
 
+def save_data_to_db_if_not_exists(car):
+    """Verifica se o carro já está no banco de dados e salva os dados caso não exista."""
+    unique_id = car['UniqueId']
+    
+    if car_exists_in_db(unique_id):
+        logging.info(f"Carro com UniqueId {unique_id} já está no banco de dados. Não será inserido novamente.")
+        return False
+
+    return save_data_to_db(car)
+
 def process_and_save_page_data(page_folder):
     # Junta todos os arquivos JSON da página em uma única lista
     all_cars = []
@@ -160,7 +180,7 @@ def process_and_save_page_data(page_folder):
     # Salva os dados coletados no banco de dados
     if all_cars:
         for car in all_cars:
-            save_data_to_db(car)
+            save_data_to_db_if_not_exists(car)
 
 def main():
     checkpoint = load_checkpoint()
@@ -173,75 +193,90 @@ def main():
         car_start_index = 1
 
     while True:
-        logging.info(f"Fetching data for page {page}...")
-        response = fetch_data(page)
-        if response.status_code != 200:
-            logging.error(f"Erro ao fazer requisição: {response.status_code} - {response.text}")
-            break
-        
-        data = response.json()
-        if not data.get('SearchResults'):
-            logging.info("Não há mais resultados.")
-            break
+        try:
+            logging.info(f"Fetching data for page {page}...")
+            response = fetch_data(page)
+            if response.status_code != 200:
+                logging.error(f"Erro ao fazer requisição: {response.status_code} - {response.text}")
+                time.sleep(300)  # Aguarda 5 minutos antes de tentar novamente
+                continue
+            
+            data = response.json()
+            if not data.get('SearchResults'):
+                logging.info("Não há mais resultados.")
+                break
 
-        # Cria a pasta para a página
-        page_folder = os.path.join('storage', f'{page}')
-        if not os.path.exists(page_folder):
-            os.makedirs(page_folder)
+            # Cria a pasta para a página
+            page_folder = os.path.join('storage', f'{page}')
+            if not os.path.exists(page_folder):
+                os.makedirs(page_folder)
 
-        # Salva o arquivo JSON da página inteira
-        page_json_path = os.path.join('storage', f'{page}.json')
-        with open(page_json_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-        logging.info(f'Dados da página {page} salvos com sucesso.')
+            # Salva o arquivo JSON da página inteira
+            page_json_path = os.path.join('storage', f'{page}.json')
+            with open(page_json_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+            logging.info(f'Dados da página {page} salvos com sucesso.')
 
-        total_cars = len(data['SearchResults'])
+            total_cars = len(data['SearchResults'])
 
-        # Para cada carro, busque os detalhes e salve em um arquivo separado
-        for index, car in enumerate(data['SearchResults'][car_start_index-1:], start=car_start_index):
-            unique_id = car.get('UniqueId')
-            details_response = fetch_car_details(unique_id)
-            if details_response.status_code == 200:
-                car['Details'] = details_response.json()
-            else:
-                logging.error(f"Erro ao buscar detalhes do carro com UniqueId {unique_id}: {details_response.status_code}")
+            # Para cada carro, busque os detalhes e salve em um arquivo separado
+            for index, car in enumerate(data['SearchResults'][car_start_index-1:], start=car_start_index):
+                unique_id = car.get('UniqueId')
+
+                # Verifica se os detalhes do carro já estão no banco de dados
+                details_response = fetch_car_details_if_not_exists(unique_id)
+                if details_response is None:
+                    # Se o carro já existe no banco de dados, continue para o próximo carro
+                    continue
+
+                if details_response.status_code == 200:
+                    car['Details'] = details_response.json()
+                else:
+                    logging.error(f"Erro ao buscar detalhes do carro com UniqueId {unique_id}: {details_response.status_code}")
+                    save_checkpoint(page, index)
+                    time.sleep(300)  # Aguarda 5 minutos antes de tentar novamente
+                    continue
+
+                # Salva os dados do carro em um arquivo JSON separado dentro da pasta da página
+                car_json_path = os.path.join(page_folder, f'{index}.json')
+                with open(car_json_path, 'w', encoding='utf-8') as f:
+                    json.dump(car, f, indent=4, ensure_ascii=False)
+
+                logging.info(f'Detalhes do carro {index} da página {page} salvos com sucesso. UniqueId: {unique_id}, Título: {car["Specification"]["Title"]}')
+
+                # Salva o checkpoint após cada carro processado com sucesso
                 save_checkpoint(page, index)
-                return  # Interrompe o script
 
-            # Salva os dados do carro em um arquivo JSON separado dentro da pasta da página
-            car_json_path = os.path.join(page_folder, f'{index}.json')
-            with open(car_json_path, 'w', encoding='utf-8') as f:
-                json.dump(car, f, indent=4, ensure_ascii=False)
+                # Insere no banco de dados apenas se o carro não estiver lá
+                save_data_to_db_if_not_exists(car)
 
-            logging.info(f'Detalhes do carro {index} da página {page} salvos com sucesso.')
+                # Aumenta o intervalo de espera aleatório entre 30 e 60 segundos entre as requisições de carros
+                sleep_time_car = random.randint(30, 60)
+                logging.info(f"Aguardando {sleep_time_car} segundos antes de buscar o próximo carro...")
+                time.sleep(sleep_time_car)
 
-            # Salva o checkpoint após cada carro processado com sucesso
-            save_checkpoint(page, index)
+            # Processa e salva os dados da página inteira no banco de dados
+            process_and_save_page_data(page_folder)
 
-            # Gera um intervalo de espera aleatório entre 5 e 10 segundos entre as requisições de carros
-            sleep_time_car = random.randint(5, 10)
-            logging.info(f"Aguardando {sleep_time_car} segundos antes de buscar o próximo carro...")
-            time.sleep(sleep_time_car)
+            # Verifica se todos os carros da página foram processados
+            if index == total_cars:
+                car_start_index = 1  # Reinicia o índice de carros para a próxima página
+                logging.info(f'Dados da página {page} e seus carros coletados e salvos com sucesso.')
 
-        # Processa e salva os dados da página inteira no banco de dados
-        process_and_save_page_data(page_folder)
+                # Aumenta o intervalo de espera aleatório entre 60 e 120 segundos entre as requisições de páginas
+                sleep_time_page = random.randint(60, 120)
+                logging.info(f"Aguardando {sleep_time_page} segundos antes de continuar para a próxima página...")
+                time.sleep(sleep_time_page)
 
-        # Verifica se todos os carros da página foram processados
-        if index == total_cars:
-            car_start_index = 1  # Reinicia o índice de carros para a próxima página
-            logging.info(f'Dados da página {page} e seus carros coletados e salvos com sucesso.')
+                page += 1
+            else:
+                logging.info(f"A página {page} ainda não foi totalmente processada.")
+                save_checkpoint(page, car_start_index)
 
-            # Gera um intervalo de espera aleatório entre 15 e 20 segundos entre as requisições de páginas
-            sleep_time_page = random.randint(15, 20)
-            logging.info(f"Aguardando {sleep_time_page} segundos antes de continuar para a próxima página...")
-            time.sleep(sleep_time_page)
-
-            page += 1
-        else:
-            logging.info(f"A página {page} ainda não foi totalmente processada.")
-            save_checkpoint(page, car_start_index)
-
-    logging.info('Todos os dados foram coletados e salvos com sucesso!')
+        except Exception as e:
+            logging.error(f"Erro inesperado: {e}")
+            logging.info("Aguardando 5 minutos antes de tentar novamente...")
+            time.sleep(300)  # Aguarda 5 minutos em caso de erro inesperado antes de tentar novamente
 
 if __name__ == "__main__":
     main()
